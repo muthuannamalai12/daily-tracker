@@ -18,16 +18,21 @@ function dateKey(year, month, day) {
   return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
-// ─── useData (Supabase) ───────────────────────────────────────────────────────
+// ─── useData (stale-while-revalidate) ────────────────────────────────────────
 function useData() {
-  const [data, setData] = useState({})
-  const [loading, setLoading] = useState(true)
+  // 1. Instantly seed from localStorage — zero loading delay
+  const [data, setData] = useState(() => {
+    try {
+      const s = localStorage.getItem(STORAGE_KEY)
+      return s ? JSON.parse(s) : {}
+    } catch { return {} }
+  })
   const [syncing, setSyncing] = useState(false)
+  const [synced, setSynced] = useState(false)
 
-  // Load all rows from Supabase on mount
+  // 2. Fetch from Supabase in background, merge on top
   useEffect(() => {
-    async function load() {
-      setLoading(true)
+    async function revalidate() {
       const { data: rows, error } = await supabase
         .from('tracker')
         .select('date, office, gym')
@@ -38,40 +43,39 @@ function useData() {
           map[row.date] = { office: row.office, gym: row.gym }
         }
         setData(map)
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(map))
       }
-      setLoading(false)
+      setSynced(true)
     }
-    load()
+    revalidate()
   }, [])
 
   const toggle = useCallback(async (key, type) => {
-    // Optimistically update UI immediately
-    let newData
+    // Optimistic update to UI + localStorage immediately
+    let updated
     setData(prev => {
-      newData = {
+      updated = {
         ...prev,
-        [key]: { office: prev[key]?.office ?? false, gym: prev[key]?.gym ?? false, [type]: !prev[key]?.[type] },
+        [key]: {
+          office: prev[key]?.office ?? false,
+          gym: prev[key]?.gym ?? false,
+          [type]: !prev[key]?.[type],
+        },
       }
-      return newData
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated))
+      return updated
     })
 
     setSyncing(true)
-
-    // Upsert the toggled row to Supabase
-    setData(prev => {
-      const row = prev[key] ?? { office: false, gym: false }
-      supabase
-        .from('tracker')
-        .upsert({ date: key, office: row.office, gym: row.gym }, { onConflict: 'date' })
-        .then(({ error }) => {
-          if (error) console.error('Supabase sync error:', error)
-          setSyncing(false)
-        })
-      return prev
-    })
+    const row = updated[key]
+    const { error } = await supabase
+      .from('tracker')
+      .upsert({ date: key, office: row.office, gym: row.gym }, { onConflict: 'date' })
+    if (error) console.error('Supabase sync error:', error)
+    setSyncing(false)
   }, [])
 
-  return { data, toggle, loading, syncing }
+  return { data, toggle, loading: false, syncing, synced }
 }
 
 function getMonthStats(data, year, month) {
@@ -230,7 +234,7 @@ export default function App() {
   const [view, setView] = useState('month')
   const [year, setYear] = useState(today.getFullYear())
   const [month, setMonth] = useState(today.getMonth())
-  const { data, toggle, loading, syncing } = useData()
+  const { data, toggle, loading, syncing, synced } = useData()
 
   const monthStats = getMonthStats(data, year, month)
   const yearStats = getYearStats(data, year)
@@ -266,18 +270,12 @@ export default function App() {
           </div>
           <p className="tagline">Office · Gym · Every day counts</p>
           <p className="tagline sync-line">
-            <span className={`sync-dot ${loading ? 'sync-dot-loading' : syncing ? 'sync-dot-saving' : 'sync-dot-ok'}`} />
-            {loading ? 'Loading...' : syncing ? 'Saving...' : 'Synced'}
+            <span className={`sync-dot ${syncing ? 'sync-dot-saving' : synced ? 'sync-dot-ok' : 'sync-dot-loading'}`} />
+            {syncing ? 'Saving...' : synced ? 'Synced' : 'Syncing...'}
           </p>
         </header>
 
-        {loading ? (
-          <div className="loading-screen">
-            <div className="loading-ring" />
-            <p className="tagline">Loading your data...</p>
-          </div>
-        ) : (
-          <>
+        <>
             {/* Stats */}
             <div className="stats-row">
               <StatCard
@@ -365,8 +363,7 @@ export default function App() {
             </div>
 
             <p className="footer">Data synced across all your devices</p>
-          </>
-        )}
+        </>
       </div>
     </div>
   )
