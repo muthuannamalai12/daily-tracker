@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { createClient } from '@supabase/supabase-js'
 
 // ─── Supabase ─────────────────────────────────────────────────────────────────
@@ -18,7 +18,7 @@ function dateKey(year, month, day) {
   return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
-// ─── useData (stale-while-revalidate) ────────────────────────────────────────
+// ─── useData (stale-while-revalidate + debounced batch save) ─────────────────
 function useData() {
   // 1. Instantly seed from localStorage — zero loading delay
   const [data, setData] = useState(() => {
@@ -30,15 +30,30 @@ function useData() {
   const [syncing, setSyncing] = useState(false)
   const [synced, setSynced] = useState(false)
 
-  // 2. Fetch from Supabase in background, merge on top
+  // Pending dirty rows waiting to be flushed to Supabase
+  const pendingRef = useRef({})
+  const timerRef = useRef(null)
+
+  // 2. Fetch only current year from Supabase in background on mount
   useEffect(() => {
     async function revalidate() {
+      const currentYear = new Date().getFullYear()
+      // Only fetch current year — previous years are already in localStorage
       const { data: rows, error } = await supabase
         .from('tracker')
         .select('date, office, gym')
+        .gte('date', `${currentYear}-01-01`)
+        .lte('date', `${currentYear}-12-31`)
 
       if (!error && rows) {
-        const map = {}
+        // Merge with existing localStorage data (keeps previous years intact)
+        const existing = (() => {
+          try {
+            const s = localStorage.getItem(STORAGE_KEY)
+            return s ? JSON.parse(s) : {}
+          } catch { return {} }
+        })()
+        const map = { ...existing }
         for (const row of rows) {
           map[row.date] = { office: row.office, gym: row.gym }
         }
@@ -50,32 +65,58 @@ function useData() {
     revalidate()
   }, [])
 
-  const toggle = useCallback(async (key, type) => {
-    // Optimistic update to UI + localStorage immediately
-    let updated
-    setData(prev => {
-      updated = {
-        ...prev,
-        [key]: {
-          office: prev[key]?.office ?? false,
-          gym: prev[key]?.gym ?? false,
-          [type]: !prev[key]?.[type],
-        },
-      }
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated))
-      return updated
-    })
-
+  // 3. Flush all pending dirty rows to Supabase in one batch
+  const flush = useCallback(async () => {
+    const rows = Object.entries(pendingRef.current).map(([date, v]) => ({
+      date, office: v.office, gym: v.gym,
+    }))
+    if (!rows.length) return
+    pendingRef.current = {}
     setSyncing(true)
-    const row = updated[key]
     const { error } = await supabase
       .from('tracker')
-      .upsert({ date: key, office: row.office, gym: row.gym }, { onConflict: 'date' })
+      .upsert(rows, { onConflict: 'date' })
     if (error) console.error('Supabase sync error:', error)
     setSyncing(false)
   }, [])
 
-  return { data, toggle, loading: false, syncing, synced }
+  const toggle = useCallback((key, type) => {
+    let skipFlush = false
+    setData(prev => {
+      const current = prev[key] ?? { office: false, gym: false }
+      const newVal = !current[type]
+
+      // Skip if value didn't actually change
+      if (current[type] === newVal) { skipFlush = true; return prev }
+
+      const updated = {
+        ...prev,
+        [key]: { ...current, [type]: newVal },
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated))
+      pendingRef.current[key] = updated[key]
+      return updated
+    })
+
+    if (skipFlush) return
+
+    // Debounce flush — 2s after last toggle
+    setSynced(false)
+    clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(flush, 2000)
+  }, [flush])
+
+  // Flush on page close/tab switch so nothing is lost
+  useEffect(() => {
+    const handleUnload = () => flush()
+    window.addEventListener('beforeunload', handleUnload)
+    window.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flush()
+    })
+    return () => window.removeEventListener('beforeunload', handleUnload)
+  }, [flush])
+
+  return { data, toggle, syncing, synced }
 }
 
 function getMonthStats(data, year, month) {
@@ -234,7 +275,7 @@ export default function App() {
   const [view, setView] = useState('month')
   const [year, setYear] = useState(today.getFullYear())
   const [month, setMonth] = useState(today.getMonth())
-  const { data, toggle, loading, syncing, synced } = useData()
+  const { data, toggle, syncing, synced } = useData()
 
   const monthStats = getMonthStats(data, year, month)
   const yearStats = getYearStats(data, year)
