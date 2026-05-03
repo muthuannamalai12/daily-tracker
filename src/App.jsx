@@ -265,17 +265,16 @@ export default function App() {
             </h1>
           </div>
           <p className="tagline">Office · Gym · Every day counts</p>
-          <div className="sync-status">
-            {loading && <span className="sync-badge sync-loading">⏳ Loading...</span>}
-            {!loading && syncing && <span className="sync-badge sync-saving">🔄 Saving...</span>}
-            {!loading && !syncing && <span className="sync-badge sync-ok">☁️ Synced</span>}
-          </div>
+          <p className="tagline sync-line">
+            <span className={`sync-dot ${loading ? 'sync-dot-loading' : syncing ? 'sync-dot-saving' : 'sync-dot-ok'}`} />
+            {loading ? 'Loading...' : syncing ? 'Saving...' : 'Synced'}
+          </p>
         </header>
 
         {loading ? (
-          <div className="loading-state">
-            <span>⏳</span>
-            <p>Loading your data...</p>
+          <div className="loading-screen">
+            <div className="loading-ring" />
+            <p className="tagline">Loading your data...</p>
           </div>
         ) : (
           <>
@@ -365,7 +364,7 @@ export default function App() {
               </span>
             </div>
 
-            <p className="footer">☁️ Data synced across all your devices via Supabase</p>
+            <p className="footer">Data synced across all your devices</p>
           </>
         )}
       </div>

@@ -140,6 +140,70 @@ body {
   letter-spacing: 0.5px;
 }
 
+/* ─── Sync Status ──────────────────────────────────────────────── */
+.sync-line {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.8px;
+  margin-top: 0.3rem;
+  opacity: 0.5;
+}
+
+.sync-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.sync-dot-ok {
+  background: var(--office);
+  box-shadow: 0 0 6px var(--office-glow);
+}
+
+.sync-dot-saving {
+  background: var(--both);
+  box-shadow: 0 0 6px rgba(167,139,250,0.5);
+  animation: pulse-dot 0.8s ease-in-out infinite;
+}
+
+.sync-dot-loading {
+  background: var(--muted);
+  animation: pulse-dot 0.8s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.7); }
+}
+
+/* ─── Loading Screen ───────────────────────────────────────────── */
+.loading-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+  gap: 1.25rem;
+}
+
+.loading-ring {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--both);
+  box-shadow: 0 0 16px rgba(167,139,250,0.25);
+  animation: spin 0.85s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ─── Stats Row ────────────────────────────────────────────────── */
 .stats-row {
   display: grid;
