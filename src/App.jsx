@@ -1,6 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+import { createClient } from '@supabase/supabase-js'
 
-const STORAGE_KEY = 'daily-tracker-v1'
+// ─── Supabase ─────────────────────────────────────────────────────────────────
+const supabase = createClient(
+  'https://ikodxybhpyzafyfibijd.supabase.co',
+  'sb_publishable_IC3yk192qauezDgQeNNaUA_cdTzrV8o'
+)
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -13,24 +18,60 @@ function dateKey(year, month, day) {
   return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
+// ─── useData (Supabase) ───────────────────────────────────────────────────────
 function useData() {
-  const [data, setData] = useState(() => {
-    try {
-      const s = localStorage.getItem(STORAGE_KEY)
-      return s ? JSON.parse(s) : {}
-    } catch {
-      return {}
-    }
-  })
+  const [data, setData] = useState({})
+  const [loading, setLoading] = useState(true)
+  const [syncing, setSyncing] = useState(false)
+
+  // Load all rows from Supabase on mount
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
-  }, [data])
-  const toggle = (key, type) =>
-    setData(prev => ({
-      ...prev,
-      [key]: { ...prev[key], [type]: !prev[key]?.[type] },
-    }))
-  return { data, toggle }
+    async function load() {
+      setLoading(true)
+      const { data: rows, error } = await supabase
+        .from('tracker')
+        .select('date, office, gym')
+
+      if (!error && rows) {
+        const map = {}
+        for (const row of rows) {
+          map[row.date] = { office: row.office, gym: row.gym }
+        }
+        setData(map)
+      }
+      setLoading(false)
+    }
+    load()
+  }, [])
+
+  const toggle = useCallback(async (key, type) => {
+    // Optimistically update UI immediately
+    let newData
+    setData(prev => {
+      newData = {
+        ...prev,
+        [key]: { office: prev[key]?.office ?? false, gym: prev[key]?.gym ?? false, [type]: !prev[key]?.[type] },
+      }
+      return newData
+    })
+
+    setSyncing(true)
+
+    // Upsert the toggled row to Supabase
+    setData(prev => {
+      const row = prev[key] ?? { office: false, gym: false }
+      supabase
+        .from('tracker')
+        .upsert({ date: key, office: row.office, gym: row.gym }, { onConflict: 'date' })
+        .then(({ error }) => {
+          if (error) console.error('Supabase sync error:', error)
+          setSyncing(false)
+        })
+      return prev
+    })
+  }, [])
+
+  return { data, toggle, loading, syncing }
 }
 
 function getMonthStats(data, year, month) {
@@ -189,7 +230,7 @@ export default function App() {
   const [view, setView] = useState('month')
   const [year, setYear] = useState(today.getFullYear())
   const [month, setMonth] = useState(today.getMonth())
-  const { data, toggle } = useData()
+  const { data, toggle, loading, syncing } = useData()
 
   const monthStats = getMonthStats(data, year, month)
   const yearStats = getYearStats(data, year)
@@ -224,95 +265,109 @@ export default function App() {
             </h1>
           </div>
           <p className="tagline">Office · Gym · Every day counts</p>
+          <div className="sync-status">
+            {loading && <span className="sync-badge sync-loading">⏳ Loading...</span>}
+            {!loading && syncing && <span className="sync-badge sync-saving">🔄 Saving...</span>}
+            {!loading && !syncing && <span className="sync-badge sync-ok">☁️ Synced</span>}
+          </div>
         </header>
 
-        {/* Stats */}
-        <div className="stats-row">
-          <StatCard
-            type="office"
-            icon="🏢"
-            label="Office Days"
-            monthly={monthStats.office}
-            yearly={yearStats.office}
-          />
-          <StatCard
-            type="gym"
-            icon="💪"
-            label="Gym Days"
-            monthly={monthStats.gym}
-            yearly={yearStats.gym}
-          />
-        </div>
-
-        {/* View tabs */}
-        <div className="tabs">
-          <button
-            className={`tab ${view === 'month' ? 'tab-active' : ''}`}
-            onClick={() => setView('month')}
-          >
-            Month View
-          </button>
-          <button
-            className={`tab ${view === 'year' ? 'tab-active' : ''}`}
-            onClick={() => setView('year')}
-          >
-            Year Overview
-          </button>
-        </div>
-
-        {/* Main card */}
-        <div className="card">
-          {view === 'month' ? (
-            <>
-              <div className="cal-header">
-                <button className="nav-btn" onClick={prevMonth}>‹</button>
-                <div className="cal-title">
-                  <h2>{MONTHS[month]} {year}</h2>
-                  {!isCurrentMonth && (
-                    <button className="today-chip" onClick={goToday}>Today</button>
-                  )}
-                </div>
-                <button className="nav-btn" onClick={nextMonth}>›</button>
-              </div>
-              <MonthCalendar
-                year={year}
-                month={month}
-                data={data}
-                toggle={toggle}
-                todayStr={todayStr}
+        {loading ? (
+          <div className="loading-state">
+            <span>⏳</span>
+            <p>Loading your data...</p>
+          </div>
+        ) : (
+          <>
+            {/* Stats */}
+            <div className="stats-row">
+              <StatCard
+                type="office"
+                icon="🏢"
+                label="Office Days"
+                monthly={monthStats.office}
+                yearly={yearStats.office}
               />
-            </>
-          ) : (
-            <>
-              <div className="cal-header">
-                <button className="nav-btn" onClick={() => setYear(y => y - 1)}>‹</button>
-                <h2>{year}</h2>
-                <button className="nav-btn" onClick={() => setYear(y => y + 1)}>›</button>
-              </div>
-              <YearOverview
-                data={data}
-                year={year}
-                today={today}
-                onMonthClick={m => { setMonth(m); setView('month') }}
+              <StatCard
+                type="gym"
+                icon="💪"
+                label="Gym Days"
+                monthly={monthStats.gym}
+                yearly={yearStats.gym}
               />
-            </>
-          )}
-        </div>
+            </div>
 
-        {/* Legend */}
-        <div className="legend">
-          <span className="legend-item">
-            <span className="dot dot-office" />Office
-          </span>
-          <span className="legend-item">
-            <span className="dot dot-gym" />Gym
-          </span>
-          <span className="legend-item">
-            <span className="dot dot-both" />Both
-          </span>
-        </div>
+            {/* View tabs */}
+            <div className="tabs">
+              <button
+                className={`tab ${view === 'month' ? 'tab-active' : ''}`}
+                onClick={() => setView('month')}
+              >
+                Month View
+              </button>
+              <button
+                className={`tab ${view === 'year' ? 'tab-active' : ''}`}
+                onClick={() => setView('year')}
+              >
+                Year Overview
+              </button>
+            </div>
 
-        <p className="footer">Data saved locally in your browser ✦ Works offline</p>
+            {/* Main card */}
+            <div className="card">
+              {view === 'month' ? (
+                <>
+                  <div className="cal-header">
+                    <button className="nav-btn" onClick={prevMonth}>‹</button>
+                    <div className="cal-title">
+                      <h2>{MONTHS[month]} {year}</h2>
+                      {!isCurrentMonth && (
+                        <button className="today-chip" onClick={goToday}>Today</button>
+                      )}
+                    </div>
+                    <button className="nav-btn" onClick={nextMonth}>›</button>
+                  </div>
+                  <MonthCalendar
+                    year={year}
+                    month={month}
+                    data={data}
+                    toggle={toggle}
+                    todayStr={todayStr}
+                  />
+                </>
+              ) : (
+                <>
+                  <div className="cal-header">
+                    <button className="nav-btn" onClick={() => setYear(y => y - 1)}>‹</button>
+                    <h2>{year}</h2>
+                    <button className="nav-btn" onClick={() => setYear(y => y + 1)}>›</button>
+                  </div>
+                  <YearOverview
+                    data={data}
+                    year={year}
+                    today={today}
+                    onMonthClick={m => { setMonth(m); setView('month') }}
+                  />
+                </>
+              )}
+            </div>
+
+            {/* Legend */}
+            <div className="legend">
+              <span className="legend-item">
+                <span className="dot dot-office" />Office
+              </span>
+              <span className="legend-item">
+                <span className="dot dot-gym" />Gym
+              </span>
+              <span className="legend-item">
+                <span className="dot dot-both" />Both
+              </span>
+            </div>
+
+            <p className="footer">☁️ Data synced across all your devices via Supabase</p>
+          </>
+        )}
       </div>
     </div>
   )
