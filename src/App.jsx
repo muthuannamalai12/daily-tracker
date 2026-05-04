@@ -7,6 +7,8 @@ const supabase = createClient(
   'sb_publishable_IC3yk192qauezDgQeNNaUA_cdTzrV8o'
 )
 
+const STORAGE_KEY = 'daily-tracker-v1'
+
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
@@ -18,9 +20,9 @@ function dateKey(year, month, day) {
   return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
-// ─── useData (stale-while-revalidate + debounced batch save) ─────────────────
+// ─── useData ──────────────────────────────────────────────────────────────────
 function useData() {
-  // 1. Instantly seed from localStorage — zero loading delay
+  // 1. Seed instantly from localStorage — zero delay on first render
   const [data, setData] = useState(() => {
     try {
       const s = localStorage.getItem(STORAGE_KEY)
@@ -30,95 +32,117 @@ function useData() {
   const [syncing, setSyncing] = useState(false)
   const [synced, setSynced] = useState(false)
 
-  // Pending dirty rows waiting to be flushed to Supabase
   const pendingRef = useRef({})
   const timerRef = useRef(null)
+  const flushingRef = useRef(false)
 
-  // 2. Fetch only current year from Supabase in background on mount
+  // 2. Background revalidate from Supabase (current year only)
   useEffect(() => {
     async function revalidate() {
-      const currentYear = new Date().getFullYear()
-      // Only fetch current year — previous years are already in localStorage
-      const { data: rows, error } = await supabase
-        .from('tracker')
-        .select('date, office, gym')
-        .gte('date', `${currentYear}-01-01`)
-        .lte('date', `${currentYear}-12-31`)
+      try {
+        const year = new Date().getFullYear()
+        const { data: rows, error } = await supabase
+          .from('tracker')
+          .select('date, office, gym')
+          .gte('date', `${year}-01-01`)
+          .lte('date', `${year}-12-31`)
 
-      if (!error && rows) {
-        // Merge with existing localStorage data (keeps previous years intact)
-        const existing = (() => {
-          try {
-            const s = localStorage.getItem(STORAGE_KEY)
-            return s ? JSON.parse(s) : {}
-          } catch { return {} }
-        })()
-        const map = { ...existing }
-        for (const row of rows) {
-          map[row.date] = { office: row.office, gym: row.gym }
+        if (!error && rows) {
+          const existing = (() => {
+            try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}') }
+            catch { return {} }
+          })()
+          const merged = { ...existing }
+          for (const row of rows) {
+            merged[row.date] = { office: !!row.office, gym: !!row.gym }
+          }
+          setData(merged)
+          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(merged)) } catch {}
         }
-        setData(map)
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(map))
+      } catch (e) {
+        console.error('Revalidate error:', e)
+      } finally {
+        setSynced(true)
       }
-      setSynced(true)
     }
     revalidate()
   }, [])
 
-  // 3. Flush all pending dirty rows to Supabase in one batch
+  // 3. Flush pending dirty rows to Supabase in one batch
   const flush = useCallback(async () => {
-    const rows = Object.entries(pendingRef.current).map(([date, v]) => ({
-      date, office: v.office, gym: v.gym,
+    if (flushingRef.current) return
+    const entries = Object.entries(pendingRef.current)
+    if (!entries.length) return
+
+    const rows = entries.map(([date, v]) => ({
+      date, office: !!v.office, gym: !!v.gym,
     }))
-    if (!rows.length) return
     pendingRef.current = {}
+    flushingRef.current = true
     setSyncing(true)
-    const { error } = await supabase
-      .from('tracker')
-      .upsert(rows, { onConflict: 'date' })
-    if (error) console.error('Supabase sync error:', error)
-    setSyncing(false)
+
+    try {
+      const { error } = await supabase
+        .from('tracker')
+        .upsert(rows, { onConflict: 'date' })
+      if (error) {
+        console.error('Supabase upsert error:', error)
+        // Re-queue failed rows
+        entries.forEach(([date, v]) => {
+          pendingRef.current[date] = v
+        })
+      } else {
+        setSynced(true)
+      }
+    } catch (e) {
+      console.error('Flush error:', e)
+      entries.forEach(([date, v]) => {
+        pendingRef.current[date] = v
+      })
+    } finally {
+      flushingRef.current = false
+      setSyncing(false)
+    }
   }, [])
 
+  // 4. Toggle — instant UI update, debounced save
   const toggle = useCallback((key, type) => {
-    let skipFlush = false
     setData(prev => {
       const current = prev[key] ?? { office: false, gym: false }
-      const newVal = !current[type]
-
-      // Skip if value didn't actually change
-      if (current[type] === newVal) { skipFlush = true; return prev }
-
       const updated = {
         ...prev,
-        [key]: { ...current, [type]: newVal },
+        [key]: { ...current, [type]: !current[type] },
       }
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated))
+      // Write to localStorage immediately
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(updated)) } catch {}
+      // Queue this row as dirty
       pendingRef.current[key] = updated[key]
       return updated
     })
 
-    if (skipFlush) return
-
-    // Debounce flush — 2s after last toggle
     setSynced(false)
     clearTimeout(timerRef.current)
     timerRef.current = setTimeout(flush, 2000)
   }, [flush])
 
-  // Flush on page close/tab switch so nothing is lost
+  // 5. Flush on tab close or hide
   useEffect(() => {
-    const handleUnload = () => flush()
-    window.addEventListener('beforeunload', handleUnload)
-    window.addEventListener('visibilitychange', () => {
+    const onUnload = () => flush()
+    const onVisibility = () => {
       if (document.visibilityState === 'hidden') flush()
-    })
-    return () => window.removeEventListener('beforeunload', handleUnload)
+    }
+    window.addEventListener('beforeunload', onUnload)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      window.removeEventListener('beforeunload', onUnload)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
   }, [flush])
 
   return { data, toggle, syncing, synced }
 }
 
+// ─── Stats helpers ────────────────────────────────────────────────────────────
 function getMonthStats(data, year, month) {
   const prefix = `${year}-${String(month + 1).padStart(2, '0')}`
   let office = 0, gym = 0
@@ -167,7 +191,7 @@ function StatCard({ type, icon, label, monthly, yearly }) {
   )
 }
 
-// ─── Month Calendar ────────────────────────────────────────────────────────────
+// ─── Month Calendar ───────────────────────────────────────────────────────────
 function MonthCalendar({ year, month, data, toggle, todayStr }) {
   const daysInMonth = new Date(year, month + 1, 0).getDate()
   const firstDay = new Date(year, month, 1).getDay()
@@ -205,16 +229,12 @@ function MonthCalendar({ year, month, data, toggle, todayStr }) {
                   className={`day-btn ${d.office ? 'btn-office' : ''}`}
                   onClick={() => toggle(key, 'office')}
                   title="Toggle office"
-                >
-                  🏢
-                </button>
+                >🏢</button>
                 <button
                   className={`day-btn ${d.gym ? 'btn-gym' : ''}`}
                   onClick={() => toggle(key, 'gym')}
                   title="Toggle gym"
-                >
-                  💪
-                </button>
+                >💪</button>
               </div>
             </div>
           )
@@ -227,9 +247,7 @@ function MonthCalendar({ year, month, data, toggle, todayStr }) {
 // ─── Year Overview ────────────────────────────────────────────────────────────
 function YearOverview({ data, year, today, onMonthClick }) {
   const months = MONTHS_SHORT.map((name, m) => ({
-    name,
-    m,
-    ...getMonthStats(data, year, m),
+    name, m, ...getMonthStats(data, year, m),
   }))
   const maxVal = Math.max(...months.flatMap(({ office, gym }) => [office, gym]), 1)
 
@@ -246,17 +264,11 @@ function YearOverview({ data, year, today, onMonthClick }) {
             <span className="month-tile-name">{name}</span>
             <div className="month-bars">
               <div className="month-bar-row">
-                <div
-                  className="month-bar office-bar"
-                  style={{ width: `${Math.round((office / maxVal) * 100)}%` }}
-                />
+                <div className="month-bar office-bar" style={{ width: `${Math.round((office / maxVal) * 100)}%` }} />
                 <span className="month-bar-val">{office}</span>
               </div>
               <div className="month-bar-row">
-                <div
-                  className="month-bar gym-bar"
-                  style={{ width: `${Math.round((gym / maxVal) * 100)}%` }}
-                />
+                <div className="month-bar gym-bar" style={{ width: `${Math.round((gym / maxVal) * 100)}%` }} />
                 <span className="month-bar-val">{gym}</span>
               </div>
             </div>
@@ -293,7 +305,6 @@ export default function App() {
 
   return (
     <div className="app">
-      {/* Ambient background */}
       <div className="ambient">
         <div className="orb orb-a" />
         <div className="orb orb-b" />
@@ -301,13 +312,10 @@ export default function App() {
       </div>
 
       <div className="page">
-        {/* Header */}
         <header className="header">
           <div className="logo">
             <span className="logo-emoji">📅</span>
-            <h1>
-              Daily <span className="grad">Tracker</span>
-            </h1>
+            <h1>Daily <span className="grad">Tracker</span></h1>
           </div>
           <p className="tagline">Office · Gym · Every day counts</p>
           <p className="tagline sync-line">
@@ -316,95 +324,54 @@ export default function App() {
           </p>
         </header>
 
-        <>
-            {/* Stats */}
-            <div className="stats-row">
-              <StatCard
-                type="office"
-                icon="🏢"
-                label="Office Days"
-                monthly={monthStats.office}
-                yearly={yearStats.office}
-              />
-              <StatCard
-                type="gym"
-                icon="💪"
-                label="Gym Days"
-                monthly={monthStats.gym}
-                yearly={yearStats.gym}
-              />
-            </div>
+        <div className="stats-row">
+          <StatCard type="office" icon="🏢" label="Office Days" monthly={monthStats.office} yearly={yearStats.office} />
+          <StatCard type="gym" icon="💪" label="Gym Days" monthly={monthStats.gym} yearly={yearStats.gym} />
+        </div>
 
-            {/* View tabs */}
-            <div className="tabs">
-              <button
-                className={`tab ${view === 'month' ? 'tab-active' : ''}`}
-                onClick={() => setView('month')}
-              >
-                Month View
-              </button>
-              <button
-                className={`tab ${view === 'year' ? 'tab-active' : ''}`}
-                onClick={() => setView('year')}
-              >
-                Year Overview
-              </button>
-            </div>
+        <div className="tabs">
+          <button className={`tab ${view === 'month' ? 'tab-active' : ''}`} onClick={() => setView('month')}>
+            Month View
+          </button>
+          <button className={`tab ${view === 'year' ? 'tab-active' : ''}`} onClick={() => setView('year')}>
+            Year Overview
+          </button>
+        </div>
 
-            {/* Main card */}
-            <div className="card">
-              {view === 'month' ? (
-                <>
-                  <div className="cal-header">
-                    <button className="nav-btn" onClick={prevMonth}>‹</button>
-                    <div className="cal-title">
-                      <h2>{MONTHS[month]} {year}</h2>
-                      {!isCurrentMonth && (
-                        <button className="today-chip" onClick={goToday}>Today</button>
-                      )}
-                    </div>
-                    <button className="nav-btn" onClick={nextMonth}>›</button>
-                  </div>
-                  <MonthCalendar
-                    year={year}
-                    month={month}
-                    data={data}
-                    toggle={toggle}
-                    todayStr={todayStr}
-                  />
-                </>
-              ) : (
-                <>
-                  <div className="cal-header">
-                    <button className="nav-btn" onClick={() => setYear(y => y - 1)}>‹</button>
-                    <h2>{year}</h2>
-                    <button className="nav-btn" onClick={() => setYear(y => y + 1)}>›</button>
-                  </div>
-                  <YearOverview
-                    data={data}
-                    year={year}
-                    today={today}
-                    onMonthClick={m => { setMonth(m); setView('month') }}
-                  />
-                </>
-              )}
-            </div>
+        <div className="card">
+          {view === 'month' ? (
+            <>
+              <div className="cal-header">
+                <button className="nav-btn" onClick={prevMonth}>‹</button>
+                <div className="cal-title">
+                  <h2>{MONTHS[month]} {year}</h2>
+                  {!isCurrentMonth && (
+                    <button className="today-chip" onClick={goToday}>Today</button>
+                  )}
+                </div>
+                <button className="nav-btn" onClick={nextMonth}>›</button>
+              </div>
+              <MonthCalendar year={year} month={month} data={data} toggle={toggle} todayStr={todayStr} />
+            </>
+          ) : (
+            <>
+              <div className="cal-header">
+                <button className="nav-btn" onClick={() => setYear(y => y - 1)}>‹</button>
+                <h2>{year}</h2>
+                <button className="nav-btn" onClick={() => setYear(y => y + 1)}>›</button>
+              </div>
+              <YearOverview data={data} year={year} today={today} onMonthClick={m => { setMonth(m); setView('month') }} />
+            </>
+          )}
+        </div>
 
-            {/* Legend */}
-            <div className="legend">
-              <span className="legend-item">
-                <span className="dot dot-office" />Office
-              </span>
-              <span className="legend-item">
-                <span className="dot dot-gym" />Gym
-              </span>
-              <span className="legend-item">
-                <span className="dot dot-both" />Both
-              </span>
-            </div>
+        <div className="legend">
+          <span className="legend-item"><span className="dot dot-office" />Office</span>
+          <span className="legend-item"><span className="dot dot-gym" />Gym</span>
+          <span className="legend-item"><span className="dot dot-both" />Both</span>
+        </div>
 
-            <p className="footer">Data synced across all your devices</p>
-        </>
+        <p className="footer">Data synced across all your devices</p>
       </div>
     </div>
   )
