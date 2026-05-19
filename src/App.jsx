@@ -22,7 +22,6 @@ function dateKey(year, month, day) {
 
 // ─── useData ──────────────────────────────────────────────────────────────────
 function useData() {
-  // 1. Seed instantly from localStorage — zero delay on first render
   const [data, setData] = useState(() => {
     try {
       const s = localStorage.getItem(STORAGE_KEY)
@@ -36,14 +35,13 @@ function useData() {
   const timerRef = useRef(null)
   const flushingRef = useRef(false)
 
-  // 2. Background revalidate from Supabase (current year only)
   useEffect(() => {
     async function revalidate() {
       try {
         const year = new Date().getFullYear()
         const { data: rows, error } = await supabase
           .from('tracker')
-          .select('date, office, gym')
+          .select('date, office, gym, home')
           .gte('date', `${year}-01-01`)
           .lte('date', `${year}-12-31`)
 
@@ -54,7 +52,7 @@ function useData() {
           })()
           const merged = { ...existing }
           for (const row of rows) {
-            merged[row.date] = { office: !!row.office, gym: !!row.gym }
+            merged[row.date] = { office: !!row.office, gym: !!row.gym, home: !!row.home }
           }
           setData(merged)
           try { localStorage.setItem(STORAGE_KEY, JSON.stringify(merged)) } catch {}
@@ -68,14 +66,13 @@ function useData() {
     revalidate()
   }, [])
 
-  // 3. Flush pending dirty rows to Supabase in one batch
   const flush = useCallback(async () => {
     if (flushingRef.current) return
     const entries = Object.entries(pendingRef.current)
     if (!entries.length) return
 
     const rows = entries.map(([date, v]) => ({
-      date, office: !!v.office, gym: !!v.gym,
+      date, office: !!v.office, gym: !!v.gym, home: !!v.home,
     }))
     pendingRef.current = {}
     flushingRef.current = true
@@ -87,35 +84,27 @@ function useData() {
         .upsert(rows, { onConflict: 'date' })
       if (error) {
         console.error('Supabase upsert error:', error)
-        // Re-queue failed rows
-        entries.forEach(([date, v]) => {
-          pendingRef.current[date] = v
-        })
+        entries.forEach(([date, v]) => { pendingRef.current[date] = v })
       } else {
         setSynced(true)
       }
     } catch (e) {
       console.error('Flush error:', e)
-      entries.forEach(([date, v]) => {
-        pendingRef.current[date] = v
-      })
+      entries.forEach(([date, v]) => { pendingRef.current[date] = v })
     } finally {
       flushingRef.current = false
       setSyncing(false)
     }
   }, [])
 
-  // 4. Toggle — instant UI update, debounced save
   const toggle = useCallback((key, type) => {
     setData(prev => {
-      const current = prev[key] ?? { office: false, gym: false }
+      const current = prev[key] ?? { office: false, gym: false, home: false }
       const updated = {
         ...prev,
         [key]: { ...current, [type]: !current[type] },
       }
-      // Write to localStorage immediately
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(updated)) } catch {}
-      // Queue this row as dirty
       pendingRef.current[key] = updated[key]
       return updated
     })
@@ -125,7 +114,6 @@ function useData() {
     timerRef.current = setTimeout(flush, 2000)
   }, [flush])
 
-  // 5. Flush on tab close or hide
   useEffect(() => {
     const onUnload = () => flush()
     const onVisibility = () => {
@@ -142,28 +130,30 @@ function useData() {
   return { data, toggle, syncing, synced }
 }
 
-// ─── Stats helpers ────────────────────────────────────────────────────────────
+// ─── Stats helpers ─────────────────────────────────────────────────────────────
 function getMonthStats(data, year, month) {
   const prefix = `${year}-${String(month + 1).padStart(2, '0')}`
-  let office = 0, gym = 0
+  let office = 0, gym = 0, home = 0
   for (const [k, v] of Object.entries(data)) {
     if (k.startsWith(prefix)) {
       if (v.office) office++
       if (v.gym) gym++
+      if (v.home) home++
     }
   }
-  return { office, gym }
+  return { office, gym, home }
 }
 
 function getYearStats(data, year) {
-  let office = 0, gym = 0
+  let office = 0, gym = 0, home = 0
   for (const [k, v] of Object.entries(data)) {
     if (k.startsWith(`${year}-`)) {
       if (v.office) office++
       if (v.gym) gym++
+      if (v.home) home++
     }
   }
-  return { office, gym }
+  return { office, gym, home }
 }
 
 // ─── Stat Card ────────────────────────────────────────────────────────────────
@@ -211,17 +201,24 @@ function MonthCalendar({ year, month, data, toggle, todayStr }) {
           const key = dateKey(year, month, day)
           const d = data[key] || {}
           const isToday = key === todayStr
-          const both = d.office && d.gym
+
+          // Cell colour priority: all three > office+gym > office+home > gym+home > single
+          const activeCount = [d.office, d.gym, d.home].filter(Boolean).length
+          const cellClass = (() => {
+            if (activeCount === 3) return 'has-all'
+            if (d.office && d.gym) return 'has-both'
+            if (d.office && d.home) return 'has-office-home'
+            if (d.gym && d.home) return 'has-gym-home'
+            if (d.office) return 'has-office'
+            if (d.gym) return 'has-gym'
+            if (d.home) return 'has-home'
+            return ''
+          })()
+
           return (
             <div
               key={i}
-              className={[
-                'day-cell',
-                isToday ? 'is-today' : '',
-                d.office && !d.gym ? 'has-office' : '',
-                d.gym && !d.office ? 'has-gym' : '',
-                both ? 'has-both' : '',
-              ].join(' ')}
+              className={['day-cell', isToday ? 'is-today' : '', cellClass].join(' ')}
             >
               <span className="day-num">{day}</span>
               <div className="day-btns">
@@ -230,6 +227,11 @@ function MonthCalendar({ year, month, data, toggle, todayStr }) {
                   onClick={() => toggle(key, 'office')}
                   title="Toggle office"
                 >🏢</button>
+                <button
+                  className={`day-btn ${d.home ? 'btn-home' : ''}`}
+                  onClick={() => toggle(key, 'home')}
+                  title="Toggle home"
+                >🏠</button>
                 <button
                   className={`day-btn ${d.gym ? 'btn-gym' : ''}`}
                   onClick={() => toggle(key, 'gym')}
@@ -249,11 +251,11 @@ function YearOverview({ data, year, today, onMonthClick }) {
   const months = MONTHS_SHORT.map((name, m) => ({
     name, m, ...getMonthStats(data, year, m),
   }))
-  const maxVal = Math.max(...months.flatMap(({ office, gym }) => [office, gym]), 1)
+  const maxVal = Math.max(...months.flatMap(({ office, gym, home }) => [office, gym, home]), 1)
 
   return (
     <div className="year-grid">
-      {months.map(({ name, m, office, gym }) => {
+      {months.map(({ name, m, office, gym, home }) => {
         const isCurrent = year === today.getFullYear() && m === today.getMonth()
         return (
           <button
@@ -266,6 +268,10 @@ function YearOverview({ data, year, today, onMonthClick }) {
               <div className="month-bar-row">
                 <div className="month-bar office-bar" style={{ width: `${Math.round((office / maxVal) * 100)}%` }} />
                 <span className="month-bar-val">{office}</span>
+              </div>
+              <div className="month-bar-row">
+                <div className="month-bar home-bar" style={{ width: `${Math.round((home / maxVal) * 100)}%` }} />
+                <span className="month-bar-val">{home}</span>
               </div>
               <div className="month-bar-row">
                 <div className="month-bar gym-bar" style={{ width: `${Math.round((gym / maxVal) * 100)}%` }} />
@@ -317,7 +323,7 @@ export default function App() {
             <span className="logo-emoji">📅</span>
             <h1>Daily <span className="grad">Tracker</span></h1>
           </div>
-          <p className="tagline">Office · Gym · Every day counts</p>
+          <p className="tagline">Office · Home · Gym · Every day counts</p>
           <p className="tagline sync-line">
             <span className={`sync-dot ${syncing ? 'sync-dot-saving' : synced ? 'sync-dot-ok' : 'sync-dot-loading'}`} />
             {syncing ? 'Saving...' : synced ? 'Synced' : 'Syncing...'}
@@ -326,7 +332,8 @@ export default function App() {
 
         <div className="stats-row">
           <StatCard type="office" icon="🏢" label="Office Days" monthly={monthStats.office} yearly={yearStats.office} />
-          <StatCard type="gym" icon="💪" label="Gym Days" monthly={monthStats.gym} yearly={yearStats.gym} />
+          <StatCard type="home"   icon="🏠" label="Home Days"   monthly={monthStats.home}   yearly={yearStats.home} />
+          <StatCard type="gym"    icon="💪" label="Gym Days"    monthly={monthStats.gym}    yearly={yearStats.gym} />
         </div>
 
         <div className="tabs">
@@ -367,8 +374,9 @@ export default function App() {
 
         <div className="legend">
           <span className="legend-item"><span className="dot dot-office" />Office</span>
+          <span className="legend-item"><span className="dot dot-home" />Home</span>
           <span className="legend-item"><span className="dot dot-gym" />Gym</span>
-          <span className="legend-item"><span className="dot dot-both" />Both</span>
+          <span className="legend-item"><span className="dot dot-both" />Office+Gym</span>
         </div>
 
         <p className="footer">Data synced across all your devices</p>
