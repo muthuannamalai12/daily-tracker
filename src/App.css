@@ -659,3 +659,76 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-hover); }
+
+/* ─── Home colour ──────────────────────────────────────────────── */
+:root {
+  --home: #34d399;
+  --home-dim: rgba(52, 211, 153, 0.18);
+  --home-glow: rgba(52, 211, 153, 0.35);
+}
+
+.stat-home {
+  border-color: rgba(52, 211, 153, 0.25);
+  box-shadow: 0 0 40px rgba(52, 211, 153, 0.06);
+}
+.stat-home:hover { box-shadow: 0 12px 40px rgba(52, 211, 153, 0.18); }
+.stat-home .stat-icon-wrap { background: var(--home-dim); }
+.home-text { color: var(--home); }
+
+/* 3-column stats row */
+.stats-row { grid-template-columns: 1fr 1fr 1fr; }
+
+/* Home button */
+.btn-home {
+  opacity: 1;
+  background: var(--home-dim);
+  border-color: rgba(52, 211, 153, 0.5);
+  box-shadow: 0 0 8px var(--home-glow);
+}
+
+/* Day cell states with home */
+.day-cell.has-home {
+  border-color: rgba(52, 211, 153, 0.4);
+  background: var(--home-dim);
+  box-shadow: 0 0 16px rgba(52, 211, 153, 0.1);
+}
+.day-cell.has-home .day-num { color: var(--text); }
+
+.day-cell.has-office-home {
+  border-color: rgba(52, 211, 153, 0.4);
+  background: linear-gradient(135deg, var(--office-dim), var(--home-dim));
+  box-shadow: 0 0 16px rgba(52, 211, 153, 0.12);
+}
+.day-cell.has-gym-home {
+  border-color: rgba(251, 146, 60, 0.4);
+  background: linear-gradient(135deg, var(--gym-dim), var(--home-dim));
+  box-shadow: 0 0 16px rgba(251, 146, 60, 0.12);
+}
+.day-cell.has-all {
+  border-color: rgba(167, 139, 250, 0.5);
+  background: linear-gradient(135deg, var(--office-dim), var(--home-dim), var(--gym-dim));
+  box-shadow: 0 0 20px rgba(167, 139, 250, 0.18);
+}
+.day-cell.has-office-home .day-num,
+.day-cell.has-gym-home .day-num,
+.day-cell.has-all .day-num { color: var(--text); }
+
+/* Home legend dot */
+.dot-home { background: var(--home); box-shadow: 0 0 6px var(--home); }
+
+/* Home bar in year overview */
+.home-bar { background: linear-gradient(90deg, var(--home), #6ee7b7); }
+
+/* 3 buttons fit in day cell */
+.day-btns { gap: 2px; }
+.day-btn { width: 22px; height: 22px; font-size: 0.65rem; }
+
+@media (max-width: 520px) {
+  .stats-row { grid-template-columns: 1fr; }
+  .day-btn { width: 18px; height: 18px; font-size: 0.55rem; }
+}
+
+@media (min-width: 521px) and (max-width: 680px) {
+  .stats-row { grid-template-columns: 1fr 1fr; }
+  .stat-home { grid-column: 1 / -1; }
+}
